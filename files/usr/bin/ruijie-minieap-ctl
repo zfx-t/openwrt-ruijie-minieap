@@ -67,6 +67,8 @@ service=$RUIJIE_SERVICE
 version-str=$RUIJIE_VERSION_STR
 fake-serial=$RUIJIE_FAKE_SERIAL
 max-dhcp-count=3
+# after auth: refresh OpenWrt WAN lease (isolated pre-auth IP -> real IP)
+dhcp-script=${RUIJIE_DHCP_SCRIPT:-/usr/bin/ruijie-post-auth.sh}
 EOF
   chmod 600 "$CONF_FILE"
   log "wrote $CONF_FILE (nic=$RUIJIE_NIC eap-bcast=$RUIJIE_EAP_BCAST dhcp=$RUIJIE_DHCP_TYPE)"
@@ -76,6 +78,7 @@ run_minieap() {
   # $1 = extra daemonize flag args end: e.g. -b 0  or  -b 3 -w
   load_env
   check_minieap
+  _dhcp_script="${RUIJIE_DHCP_SCRIPT:-/usr/bin/ruijie-post-auth.sh}"
   # shellcheck disable=SC2086
   "$MINIEAP_BIN" -k 1 \
     -u "$RUIJIE_USERNAME" \
@@ -88,6 +91,7 @@ run_minieap() {
     --version-str "$RUIJIE_VERSION_STR" \
     --service "$RUIJIE_SERVICE" \
     --fake-serial "$RUIJIE_FAKE_SERIAL" \
+    -c "$_dhcp_script" \
     -t 8 --max-retries 3 \
     "$@"
 }

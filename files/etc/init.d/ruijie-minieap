@@ -10,10 +10,55 @@ NAME=ruijie-minieap
 CTL=/usr/bin/ruijie-minieap-ctl
 ENV_FILE=/etc/ruijie/env
 MINIEAP=/usr/sbin/minieap
+POST_AUTH=/usr/bin/ruijie-post-auth.sh
+
+# Wait for WAN carrier after reboot (boot is early; cable/link may lag)
+_wait_wan() {
+  # shellcheck disable=SC1090
+  [ -f "$ENV_FILE" ] && . "$ENV_FILE" 2>/dev/null || true
+  _nic="${RUIJIE_NIC:-wan}"
+  _i=0
+  while [ "$_i" -lt 30 ]; do
+    # operstate up or UNKNOWN with carrier
+    if [ -d "/sys/class/net/$_nic" ]; then
+      st=$(cat "/sys/class/net/$_nic/operstate" 2>/dev/null || echo down)
+      # has any IPv4 or link is up
+      if [ "$st" = "up" ] || ip -4 addr show "$_nic" 2>/dev/null | grep -q "inet "; then
+        logger -t "$NAME" "WAN $_nic ready (waited ${_i}s)"
+        return 0
+      fi
+    fi
+    _i=$((_i + 1))
+    sleep 1
+  done
+  logger -t "$NAME" "WAN $_nic not ready after 30s, start anyway"
+  return 0
+}
 
 boot() {
-  # delay until WAN is up
-  ( sleep 12; start ) &
+  (
+    # let netifd bring interfaces first
+    sleep 8
+    _wait_wan
+    # small extra settle
+    sleep 3
+    start
+    # if still offline, force post-auth renew a few times
+    sleep 12
+    if ! ping -c 1 -W 2 223.5.5.5 >/dev/null 2>&1; then
+      logger -t "$NAME" "still offline after start, run post-auth renew"
+      [ -x "$POST_AUTH" ] && "$POST_AUTH"
+      sleep 5
+      if ! ping -c 1 -W 2 223.5.5.5 >/dev/null 2>&1; then
+        logger -t "$NAME" "retry: restart minieap + renew"
+        stop
+        sleep 2
+        start
+        sleep 10
+        [ -x "$POST_AUTH" ] && "$POST_AUTH"
+      fi
+    fi
+  ) &
 }
 
 start_service() {
@@ -27,7 +72,6 @@ start_service() {
   }
   [ -x "$CTL" ] || return 1
 
-  # render conf from env, then run minieap under procd for respawn
   "$CTL" render-conf || return 1
 
   # shellcheck disable=SC1090
@@ -46,15 +90,17 @@ start_service() {
   SER="${RUIJIE_FAKE_SERIAL:-OPENWRT-001}"
   USER="${RUIJIE_USERNAME}"
   PASS="${RUIJIE_PASSWORD}"
+  DHCP_SCRIPT="${RUIJIE_DHCP_SCRIPT:-/usr/bin/ruijie-post-auth.sh}"
 
   procd_open_instance
-  # -b 0: procd manages process; do not double-daemonize
+  # -b 0: foreground under procd; -c post-auth renews OpenWrt WAN after 802.1x
   procd_set_param command "$MINIEAP" -k 1 \
     -u "$USER" -p "$PASS" -n "$NIC" --module "$MOD" \
     -a "$A" -d "$D" -e "$E" \
     --version-str "$VER" \
     --service "$SVC" \
     --fake-serial "$SER" \
+    -c "$DHCP_SCRIPT" \
     -t 8 --max-retries 3 \
     -b 0
   procd_set_param respawn 3600 10 0
@@ -62,7 +108,14 @@ start_service() {
   procd_set_param stderr 1
   procd_set_param file "$ENV_FILE"
   procd_close_instance
-  logger -t "$NAME" "started nic=$NIC module=$MOD a=$A d=$D"
+
+  # delayed renew even if dhcp-script is not invoked by this minieap build
+  (
+    sleep 8
+    [ -x "$POST_AUTH" ] && "$POST_AUTH"
+  ) &
+
+  logger -t "$NAME" "started nic=$NIC module=$MOD a=$A d=$D dhcp-script=$DHCP_SCRIPT"
 }
 
 stop_service() {

@@ -16,20 +16,41 @@ grep ARCH /etc/openwrt_release
 # 设置 MINIEAP_IPK_URL 后重装
 ```
 
-## 认证成功但无外网
+## 认证成功但无外网（重启后常见）
+
+**典型现象：**
+
+- `minieap` 日志有「认证成功」，进程也在跑  
+- WAN 仍是认证前隔离地址（如 `172.23.x.x`），外网 ping 不通  
+- 手动 `ubus call network.interface.wan renew` 或 `ifup wan` 后 IP 变成可上网段（如 `172.20.x.x`）并恢复  
+
+**原因：** 开机时 OpenWrt 先 DHCP 到隔离 IP；802.1x 成功后 **netifd 不会自动换租**，一直占着旧地址。
+
+**本仓库处理：**
+
+- `ruijie-post-auth.sh`：认证后强制 WAN 续租  
+- minieap `-c` / `dhcp-script` 调用该脚本  
+- 开机启动后若仍离线会再续租/重拨一次  
+
+手动修复：
 
 ```bash
-ip route
-ping 223.5.5.5
-# 防火墙 WAN masq
+/usr/bin/ruijie-post-auth.sh
+# 或
+ubus call network.interface.wan renew
+# 或
+/etc/init.d/ruijie-minieap restart; sleep 8; /usr/bin/ruijie-post-auth.sh
+```
+
+同时确认防火墙 WAN masq：
+
+```bash
 uci show firewall | grep masq
 ```
 
-确保 LAN→WAN 转发与 masq 开启。
-
 ## 认证成功后 IP 变了
 
-正常。认证前可能是隔离网段，认证后 DHCP 会换到可上网网段。
+正常。认证前多为隔离网段，认证后应续租到可上网网段；若不变，按上一节强制 renew。
 
 ## 日志位置
 

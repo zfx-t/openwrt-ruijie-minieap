@@ -35,9 +35,10 @@ echo "==> install ruijie-minieap files"
 mkdir -p /etc/ruijie /usr/bin /etc/init.d /var/log
 
 cp -f "$FILES/usr/bin/ruijie-minieap-ctl" /usr/bin/ruijie-minieap-ctl
+cp -f "$FILES/usr/bin/ruijie-post-auth.sh" /usr/bin/ruijie-post-auth.sh
 cp -f "$FILES/etc/init.d/ruijie-minieap" /etc/init.d/ruijie-minieap
 cp -f "$FILES/etc/ruijie/env.example" /etc/ruijie/env.example
-chmod +x /usr/bin/ruijie-minieap-ctl /etc/init.d/ruijie-minieap
+chmod +x /usr/bin/ruijie-minieap-ctl /usr/bin/ruijie-post-auth.sh /etc/init.d/ruijie-minieap
 
 if [ -n "$FROM_ENV" ]; then
   [ -f "$FROM_ENV" ] || { echo "env file not found: $FROM_ENV"; exit 1; }
