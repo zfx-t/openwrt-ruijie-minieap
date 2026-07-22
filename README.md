@@ -46,19 +46,19 @@ cp .env.example .env
 # 编辑 .env：账号、密码、ROUTER=192.168.x.1
 ```
 
-`.env` 示例：
+`.env` 示例（完整注释见 `.env.example`）：
 
 ```bash
-ROUTER=192.168.3.1
-SSH_USER=root
-# SSH_PASS=password          # 可选；更推荐 SSH 公钥
-RUIJIE_USERNAME=学号
-RUIJIE_PASSWORD=密码
-RUIJIE_NIC=wan
-RUIJIE_EAP_BCAST=1
-RUIJIE_DHCP_TYPE=2
-RUIJIE_VERSION_STR=RG-SU For Linux V1.31
-RUIJIE_SERVICE=internet
+ROUTER="192.168.3.1"
+SSH_USER="root"
+# SSH_PASS="password"          # 可选；更推荐 SSH 公钥
+RUIJIE_USERNAME="学号"
+RUIJIE_PASSWORD="密码"
+RUIJIE_NIC="wan"
+RUIJIE_EAP_BCAST="1"
+RUIJIE_DHCP_TYPE="2"
+RUIJIE_VERSION_STR="RG-SU For Linux V1.31"
+RUIJIE_SERVICE="internet"
 ```
 
 ```bash
@@ -100,19 +100,61 @@ ruijie-minieap-ctl render-conf
 
 ## 环境变量说明
 
-| 变量 | 默认 | 说明 |
+配置文件两处模板含义相同（路由器侧与部署侧）：
+
+| 文件 | 用途 |
+|------|------|
+| `files/etc/ruijie/env.example` | 装到路由器 → `/etc/ruijie/env` |
+| `.env.example` | 电脑本地复制为 `.env`，供 `deploy.sh` 使用 |
+
+含空格的值请加双引号；真实密码不要提交 Git。
+
+### 账号与网卡
+
+| 变量 | 默认 | 作用 |
 |------|------|------|
-| `RUIJIE_USERNAME` | （必填） | 学号/账号 |
-| `RUIJIE_PASSWORD` | （必填） | 密码 |
-| `RUIJIE_NIC` | `wan` | 认证网卡 |
-| `RUIJIE_EAP_BCAST` | `1` | 0 标准 / 1 锐捷组播 |
-| `RUIJIE_DHCP_TYPE` | `2` | 0 无 / 1 二次 / 2 认证后 / 3 认证前 |
-| `RUIJIE_SERVICE` | `internet` | 服务名 |
-| `RUIJIE_VERSION_STR` | `RG-SU For Linux V1.31` | 客户端版本串 |
-| `RUIJIE_FAKE_SERIAL` | `OPENWRT-001` | 伪造硬盘序列号 |
-| `RUIJIE_HEARTBEAT` | `60` | 心跳秒 |
-| `RUIJIE_MODULE` | `rjv3` | minieap 插件 |
-| `MINIEAP_IPK_URL` | 见 install.sh | 无 opkg 包时离线下载 |
+| `RUIJIE_USERNAME` | （必填） | 校园网登录账号，一般为学号或工号，原样交给 minieap `-u`。 |
+| `RUIJIE_PASSWORD` | （必填） | 校园网密码，交给 minieap `-p`。只应出现在 `/etc/ruijie/env` 或本地 `.env`。 |
+| `RUIJIE_NIC` | `wan` | **执行 802.1x 的网卡名**，必须是面对校园网的口。OpenWrt 上常见 `wan`；DSA 设备不要误填 `eth0` 整口，否则 EAPOL 发不到交换机。用 `ip -br link` / `uci show network.wan` 确认。 |
+
+### 锐捷认证行为
+
+| 变量 | 默认 | 作用 |
+|------|------|------|
+| `RUIJIE_EAP_BCAST` | `1` | 对应 minieap **`-a`**：EAPOL Start 的目的地址类型。`0`=标准以太网广播；**`1`=锐捷私有组播**。暨南等多数锐捷环境必须为 `1`，否则会一直「正在查找认证服务器」。 |
+| `RUIJIE_DHCP_TYPE` | `2` | 对应 minieap **`-d` / dhcp-type**：何时向校园网要 IP。`0` 不用 DHCP；`1` 二次认证；**`2` 认证成功后再 DHCP**（推荐，对齐官方「认证后获取」）；`3` 认证前先 DHCP。认证后 IP 段变化（如从隔离段换到 `172.20.x`）是正常现象。 |
+| `RUIJIE_SERVICE` | `internet` | 对应 minieap **`--service`**：学校侧配置的「服务名」。部分学校区分校园网/运营商；官方客户端可用 `-s` / `-l` 查看。不确定时先试 `internet`。 |
+| `RUIJIE_VERSION_STR` | `RG-SU For Linux V1.31` | 对应 **`--version-str`**：客户端版本声明，会打进锐捷私有字段。服务器可能校验，需与学校下发的 RG-SU 版本接近。暨南官方 Linux 学生包为 **1.31**。字符串含空格，配置时必须加引号。 |
+| `RUIJIE_FAKE_SERIAL` | `OPENWRT-001` | 对应 **`--fake-serial`**：锐捷可能采集硬盘序列号。路由器没有真实硬盘时填固定字符串即可，避免 minieap 警告或校验异常。 |
+| `RUIJIE_HEARTBEAT` | `60` | 对应 minieap **`-e` / heartbeat**：认证成功后 **Keep-Alive 间隔（秒）**，维持会话、减少被踢。常见 30～60。 |
+| `RUIJIE_MODULE` | `rjv3` | minieap 数据包插件。**`rjv3`** 实现锐捷 V3/V4 私有算法，本仓库默认且已在暨南验证。一般不要改。 |
+
+### 安装与部署（可选）
+
+| 变量 | 默认 | 作用 |
+|------|------|------|
+| `MINIEAP_IPK_URL` | 空 / install 内置 arch 默认 | 当 `opkg install minieap` 失败时，从该 URL 下载 `.ipk` 安装。须匹配 **CPU 架构**（如 `mipsel_24kc`）和 **固件年代**；过新的包在老 musl 上会报 `__time64` 等符号错误。 |
+| `ROUTER` | `192.168.1.1` | **仅 `.env` / deploy.sh**：路由器管理 IP，SSH 目标。不会写入路由器认证配置。 |
+| `SSH_USER` | `root` | **仅 deploy.sh**：SSH 用户名。 |
+| `SSH_PORT` | `22` | **仅 deploy.sh**：SSH 端口。 |
+| `SSH_PASS` | （空） | **仅 deploy.sh**：SSH 密码；需本机 `sshpass`。更推荐配置 SSH 公钥后留空。 |
+
+### 与 minieap 命令行对照
+
+| 环境变量 | minieap 选项 |
+|----------|----------------|
+| `RUIJIE_USERNAME` | `-u` |
+| `RUIJIE_PASSWORD` | `-p` |
+| `RUIJIE_NIC` | `-n` |
+| `RUIJIE_MODULE` | `--module` |
+| `RUIJIE_EAP_BCAST` | `-a` |
+| `RUIJIE_DHCP_TYPE` | `-d` |
+| `RUIJIE_HEARTBEAT` | `-e` |
+| `RUIJIE_SERVICE` | `--service` |
+| `RUIJIE_VERSION_STR` | `--version-str` |
+| `RUIJIE_FAKE_SERIAL` | `--fake-serial` |
+
+暨南宿舍口已验证的一组取值：`NIC=wan`，`EAP_BCAST=1`，`DHCP_TYPE=2`，`SERVICE=internet`，`VERSION_STR=RG-SU For Linux V1.31`。
 
 ## 原理（简要）
 
