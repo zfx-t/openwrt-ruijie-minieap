@@ -1,0 +1,81 @@
+#!/bin/sh /etc/rc.common
+# OpenWrt procd service: Ruijie campus auth via minieap
+# Config: /etc/ruijie/env
+
+START=99
+STOP=10
+USE_PROCD=1
+
+NAME=ruijie-minieap
+CTL=/usr/bin/ruijie-minieap-ctl
+ENV_FILE=/etc/ruijie/env
+MINIEAP=/usr/sbin/minieap
+
+boot() {
+  # delay until WAN is up
+  ( sleep 12; start ) &
+}
+
+start_service() {
+  [ -f "$ENV_FILE" ] || {
+    logger -t "$NAME" "missing $ENV_FILE"
+    return 1
+  }
+  [ -x "$MINIEAP" ] || {
+    logger -t "$NAME" "minieap missing"
+    return 1
+  }
+  [ -x "$CTL" ] || return 1
+
+  # render conf from env, then run minieap under procd for respawn
+  "$CTL" render-conf || return 1
+
+  # shellcheck disable=SC1090
+  set -a
+  # shellcheck source=/dev/null
+  . "$ENV_FILE"
+  set +a
+
+  NIC="${RUIJIE_NIC:-wan}"
+  MOD="${RUIJIE_MODULE:-rjv3}"
+  A="${RUIJIE_EAP_BCAST:-1}"
+  D="${RUIJIE_DHCP_TYPE:-2}"
+  E="${RUIJIE_HEARTBEAT:-60}"
+  VER="${RUIJIE_VERSION_STR:-RG-SU For Linux V1.31}"
+  SVC="${RUIJIE_SERVICE:-internet}"
+  SER="${RUIJIE_FAKE_SERIAL:-OPENWRT-001}"
+  USER="${RUIJIE_USERNAME}"
+  PASS="${RUIJIE_PASSWORD}"
+
+  procd_open_instance
+  # -b 0: procd manages process; do not double-daemonize
+  procd_set_param command "$MINIEAP" -k 1 \
+    -u "$USER" -p "$PASS" -n "$NIC" --module "$MOD" \
+    -a "$A" -d "$D" -e "$E" \
+    --version-str "$VER" \
+    --service "$SVC" \
+    --fake-serial "$SER" \
+    -t 8 --max-retries 3 \
+    -b 0
+  procd_set_param respawn 3600 10 0
+  procd_set_param stdout 1
+  procd_set_param stderr 1
+  procd_set_param file "$ENV_FILE"
+  procd_close_instance
+  logger -t "$NAME" "started nic=$NIC module=$MOD a=$A d=$D"
+}
+
+stop_service() {
+  "$MINIEAP" -k 2>/dev/null || true
+  killall minieap 2>/dev/null || true
+  [ -x "$CTL" ] && "$CTL" stop 2>/dev/null || true
+}
+
+reload_service() {
+  stop
+  start
+}
+
+service_triggers() {
+  procd_add_reload_trigger "network"
+}

@@ -1,0 +1,10 @@
+.env
+*.env
+!*.env.example
+/etc/ruijie/env
+secrets/
+*.ipk
+*.log
+.DS_Store
+*.swp
+*~
