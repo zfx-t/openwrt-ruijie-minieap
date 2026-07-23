@@ -28,7 +28,10 @@ openwrt-ruijie-minieap/
 │   ├── etc/
 │   │   ├── init.d/ruijie-minieap   # 开机服务 (procd)
 │   │   └── ruijie/env.example
-│   └── usr/bin/ruijie-minieap-ctl  # 启停/状态/验证
+│   └── usr/bin/
+│       ├── ruijie-minieap-ctl      # 启停/状态/验证
+│       ├── ruijie-post-auth.sh     # 认证后 WAN DHCP 续租
+│       └── ruijie-net-watchdog.sh  # 掉线检测 + 自动恢复 + 持久日志
 ├── scripts/verify.sh
 └── docs/
     ├── install.md
@@ -96,6 +99,12 @@ ruijie-minieap-ctl render-conf
 /etc/init.d/ruijie-minieap start
 /etc/init.d/ruijie-minieap stop
 /etc/init.d/ruijie-minieap restart
+
+# 掉线看门狗（install.sh 会装 cron：每 2 分钟检测、每 5 分钟收割日志）
+ruijie-net-watchdog.sh once       # 检测；离线则 restart minieap + post-auth
+ruijie-net-watchdog.sh snapshot   # 把现场写入持久日志
+ruijie-net-watchdog.sh harvest    # 从 logread 摘 wan/minieap 行
+tail -50 /overlay/ruijie-net.log  # 持久日志（重启不丢）
 ```
 
 ## 环境变量说明
@@ -156,12 +165,26 @@ ruijie-minieap-ctl render-conf
 
 暨南宿舍口已验证的一组取值：`NIC=wan`，`EAP_BCAST=1`，`DHCP_TYPE=2`，`SERVICE=internet`，`VERSION_STR=RG-SU For Linux V1.31`。
 
+## 掉线看门狗（ruijie-net-watchdog）
+
+`install.sh` / `deploy.sh` 会一并安装：
+
+| 项 | 说明 |
+|----|------|
+| 脚本 | `/usr/bin/ruijie-net-watchdog.sh` |
+| cron | 每 **2 分钟** `once`；每 **5 分钟** `harvest` |
+| 持久日志 | `/overlay/ruijie-net.log`（约 200KB 滚动） |
+
+离线时自动：写 snapshot → `/etc/init.d/ruijie-minieap restart` → `ruijie-post-auth.sh`（必要时再续租一次）。  
+用于覆盖：会话掉线、卡在隔离 IP（如 `172.23.x`）未 renew 到正式网段等情况。
+
 ## 原理（简要）
 
 1. 交换机对 WAN 口做 **802.1x**，需锐捷私有 EAP 扩展（RJv3）。  
 2. `minieap` 在 `wan` 上发 EAPOL，账号校验成功后可选 DHCP。  
 3. OpenWrt **NAT/masquerade** 把 LAN/WiFi 流量从已认证 WAN 出去。  
-4. 网页 Portal 劫持有时仍存在，但 **真正放行的是 802.1x**（本仓库路径）。
+4. 认证后若仍停在隔离网段，由 **post-auth 续租** + **net-watchdog** 拉回。  
+5. 网页 Portal 劫持有时仍存在，但 **真正放行的是 802.1x**（本仓库路径）。
 
 官方 Linux 客户端（RG-SU）仅 x86/x64；路由器 mips 用 minieap 等价实现。
 

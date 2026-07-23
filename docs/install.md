@@ -51,6 +51,34 @@ ls -l /etc/rc.d/S99ruijie-minieap
 /etc/init.d/ruijie-minieap enabled && echo enabled
 ```
 
+## 掉线看门狗（随 install 一起装）
+
+`install.sh` 会：
+
+1. 安装 `/usr/bin/ruijie-net-watchdog.sh`
+2. 写入 cron（幂等，重复安装会先删旧行）：
+
+```cron
+*/2 * * * * /usr/bin/ruijie-net-watchdog.sh once
+*/5 * * * * /usr/bin/ruijie-net-watchdog.sh harvest
+```
+
+3. `cron` enable + restart  
+4. 首次 `once` 种子日志 → `/overlay/ruijie-net.log`
+
+| 命令 | 作用 |
+|------|------|
+| `once` | 探测 `generate_204` / ping；离线则 restart minieap + post-auth |
+| `harvest` | 把 `logread` 中 wan/minieap 相关行 append 到持久日志 |
+| `snapshot` | 完整现场（ip/route/status/logread）写入日志 |
+| `loop` | 前台循环（一般用 cron 即可） |
+
+```bash
+grep ruijie-net-watchdog /etc/crontabs/root
+tail -50 /overlay/ruijie-net.log
+ruijie-net-watchdog.sh once
+```
+
 ## 改账号
 
 ```bash
@@ -65,4 +93,6 @@ ruijie-minieap-ctl verify
 sh uninstall.sh
 # 同时删除账号文件：
 REMOVE_ENV=1 sh uninstall.sh
+# 同时删除持久日志：
+REMOVE_LOG=1 sh uninstall.sh
 ```

@@ -57,9 +57,42 @@ uci show firewall | grep masq
 ```bash
 logread -e minieap
 logread -e ruijie
+logread -e ruijie-net-watch
 cat /var/log/minieap.log
 ruijie-minieap-ctl status
+# 持久日志（重启后仍在，看门狗写入）
+tail -100 /overlay/ruijie-net.log
 ```
+
+OpenWrt 默认 `logread` 在内存，**整机重启会丢**。看门狗把关键行和掉线现场写到 `/overlay/ruijie-net.log`，便于事后分析。
+
+## 运行中突然断网
+
+1. **先不要重启**，看是否被自动恢复：
+
+```bash
+tail -80 /overlay/ruijie-net.log
+# 期望看到 detected offline → recover success
+```
+
+2. 手动一次：
+
+```bash
+ruijie-net-watchdog.sh once
+# 或
+/etc/init.d/ruijie-minieap restart
+/usr/bin/ruijie-post-auth.sh
+```
+
+3. 仍失败再抓 snapshot：
+
+```bash
+ruijie-net-watchdog.sh snapshot
+ip -4 addr show wan
+ip route
+```
+
+常见原因：802.1x 会话掉线、卡在隔离 IP 未 renew、WAN 链路闪断。看门狗覆盖前两类。
 
 ## 与网页 Portal 的关系
 

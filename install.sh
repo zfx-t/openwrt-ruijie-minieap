@@ -32,13 +32,15 @@ done
 [ -d "$FILES" ] || { echo "missing $FILES"; exit 1; }
 
 echo "==> install ruijie-minieap files"
-mkdir -p /etc/ruijie /usr/bin /etc/init.d /var/log
+mkdir -p /etc/ruijie /usr/bin /etc/init.d /var/log /etc/crontabs
 
 cp -f "$FILES/usr/bin/ruijie-minieap-ctl" /usr/bin/ruijie-minieap-ctl
 cp -f "$FILES/usr/bin/ruijie-post-auth.sh" /usr/bin/ruijie-post-auth.sh
+cp -f "$FILES/usr/bin/ruijie-net-watchdog.sh" /usr/bin/ruijie-net-watchdog.sh
 cp -f "$FILES/etc/init.d/ruijie-minieap" /etc/init.d/ruijie-minieap
 cp -f "$FILES/etc/ruijie/env.example" /etc/ruijie/env.example
-chmod +x /usr/bin/ruijie-minieap-ctl /usr/bin/ruijie-post-auth.sh /etc/init.d/ruijie-minieap
+chmod +x /usr/bin/ruijie-minieap-ctl /usr/bin/ruijie-post-auth.sh \
+  /usr/bin/ruijie-net-watchdog.sh /etc/init.d/ruijie-minieap
 
 if [ -n "$FROM_ENV" ]; then
   [ -f "$FROM_ENV" ] || { echo "env file not found: $FROM_ENV"; exit 1; }
@@ -137,6 +139,31 @@ if [ -f /etc/init.d/minieap ] && ! grep -q ruijie-minieap /etc/init.d/minieap 2>
   /etc/init.d/minieap stop 2>/dev/null || true
 fi
 
+# ---- net watchdog: offline auto-recover + persistent overlay log ----
+install_net_watchdog() {
+  CRON=/etc/crontabs/root
+  touch "$CRON"
+  # idempotent: drop previous marker lines then re-add
+  if grep -q 'ruijie-net-watchdog' "$CRON" 2>/dev/null; then
+    sed -i '/ruijie-net-watchdog/d' "$CRON" 2>/dev/null || true
+  fi
+  cat >> "$CRON" <<'EOF'
+# ruijie-net-watchdog: offline auto-recover + persistent log
+*/2 * * * * /usr/bin/ruijie-net-watchdog.sh once
+*/5 * * * * /usr/bin/ruijie-net-watchdog.sh harvest
+EOF
+  if [ -x /etc/init.d/cron ]; then
+    /etc/init.d/cron enable 2>/dev/null || true
+    /etc/init.d/cron restart 2>/dev/null || true
+  fi
+  # seed log file (overlay survives reboot)
+  /usr/bin/ruijie-net-watchdog.sh once 2>/dev/null || true
+  echo "==> net watchdog cron installed (every 2m check, 5m log harvest)"
+  echo "    log: /overlay/ruijie-net.log"
+}
+
+install_net_watchdog
+
 if [ "$DO_START" = "1" ]; then
   echo "==> start service"
   /etc/init.d/ruijie-minieap stop 2>/dev/null || true
@@ -152,9 +179,11 @@ fi
 
 echo ""
 echo "Install done."
-echo "  env:     /etc/ruijie/env"
-echo "  ctl:     ruijie-minieap-ctl {start|stop|status|verify}"
-echo "  service: /etc/init.d/ruijie-minieap {start|stop|enable|disable}"
+echo "  env:      /etc/ruijie/env"
+echo "  ctl:      ruijie-minieap-ctl {start|stop|status|verify}"
+echo "  service:  /etc/init.d/ruijie-minieap {start|stop|enable|disable}"
+echo "  watchdog: ruijie-net-watchdog.sh {once|loop|snapshot|harvest}"
+echo "  net log:  /overlay/ruijie-net.log"
 echo ""
 if ! grep -q '^RUIJIE_USERNAME=.\+' /etc/ruijie/env 2>/dev/null || grep -q 'YOUR_STUDENT_ID' /etc/ruijie/env 2>/dev/null; then
   echo "Next: vi /etc/ruijie/env   # set username/password"

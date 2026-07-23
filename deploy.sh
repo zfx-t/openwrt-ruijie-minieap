@@ -90,6 +90,8 @@ ssh_cmd "mkdir -p /tmp/ruijie-minieap-src /etc/ruijie"
 tar cf - \
   install.sh uninstall.sh \
   files/usr/bin/ruijie-minieap-ctl \
+  files/usr/bin/ruijie-post-auth.sh \
+  files/usr/bin/ruijie-net-watchdog.sh \
   files/etc/init.d/ruijie-minieap \
   files/etc/ruijie/env.example \
   | ssh_cmd "tar xf - -C /tmp/ruijie-minieap-src"
