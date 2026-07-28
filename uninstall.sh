@@ -21,6 +21,7 @@ rm -f /etc/init.d/ruijie-minieap
 rm -f /usr/bin/ruijie-minieap-ctl
 rm -f /usr/bin/ruijie-post-auth.sh
 rm -f /usr/bin/ruijie-net-watchdog.sh
+rm -f /usr/bin/ruijie-reauth
 rm -f /etc/minieap.conf
 # keep /etc/ruijie/env by default (secrets)
 if [ "${REMOVE_ENV:-0}" = "1" ]; then

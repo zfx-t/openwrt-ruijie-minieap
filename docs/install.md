@@ -51,6 +51,16 @@ ls -l /etc/rc.d/S99ruijie-minieap
 /etc/init.d/ruijie-minieap enabled && echo enabled
 ```
 
+## 日常重新认证（一条命令）
+
+```bash
+ruijie-reauth
+# 等价：ruijie-minieap-ctl reauth
+```
+
+会完成：停旧进程 → 802.1x → post-auth DHCP 续租 → 在线检测。  
+卡在隔离 IP（如 `172.23.x`）或觉得 `restart` 没用时优先用它。
+
 ## 掉线看门狗（随 install 一起装）
 
 `install.sh` 会：

@@ -64,30 +64,37 @@ snapshot() {
 }
 
 recover() {
-  log "offline -> recover: snapshot + restart minieap + post-auth"
+  log "offline -> recover: snapshot + reauth (802.1x + DHCP)"
   snapshot
-  if [ -x /etc/init.d/ruijie-minieap ]; then
-    /etc/init.d/ruijie-minieap restart 2>/dev/null || true
+  # Prefer full reauth (auth + post-auth DHCP + online wait)
+  if [ -x /usr/bin/ruijie-minieap-ctl ]; then
+    /usr/bin/ruijie-minieap-ctl reauth 2>/dev/null || true
+  elif [ -x /usr/bin/ruijie-reauth ]; then
+    /usr/bin/ruijie-reauth 2>/dev/null || true
   else
-    killall minieap 2>/dev/null || true
+    if [ -x /etc/init.d/ruijie-minieap ]; then
+      /etc/init.d/ruijie-minieap restart 2>/dev/null || true
+    else
+      killall minieap 2>/dev/null || true
+    fi
+    sleep 8
+    if [ -x /usr/bin/ruijie-post-auth.sh ]; then
+      /usr/bin/ruijie-post-auth.sh 2>/dev/null || true
+    fi
+    sleep 5
   fi
-  sleep 8
-  if [ -x /usr/bin/ruijie-post-auth.sh ]; then
-    /usr/bin/ruijie-post-auth.sh 2>/dev/null || true
-  fi
-  sleep 5
   if is_online; then
     log "recover success"
     echo "online $(date)" > "$STATE_FILE"
     return 0
   fi
-  log "recover still offline -> second post-auth"
+  log "recover still offline -> post-auth only"
   if [ -x /usr/bin/ruijie-post-auth.sh ]; then
     /usr/bin/ruijie-post-auth.sh 2>/dev/null || true
   fi
   sleep 5
   if is_online; then
-    log "recover success (2nd post-auth)"
+    log "recover success (post-auth only)"
     echo "online $(date)" > "$STATE_FILE"
     return 0
   fi

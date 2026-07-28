@@ -1,6 +1,10 @@
 #!/bin/sh
-# Ruijie / minieap control: start|stop|restart|status|login|verify|render-conf
-# Credentials and options come from /etc/ruijie/env (or RUIJIE_ENV).
+# Ruijie / minieap control:
+#   start|stop|restart|status|login|verify|render-conf|reauth|post-auth
+# Credentials: /etc/ruijie/env (or RUIJIE_ENV).
+#
+# reauth = one-shot: stop → 802.1x → post-auth DHCP renew → online check
+#          Prefer this over bare "restart" when stuck on pre-auth IP.
 
 set -e
 
@@ -10,6 +14,8 @@ CONF_FILE="${MINIEAP_CONF:-/etc/minieap.conf}"
 PID_FILE="${MINIEAP_PID:-/var/run/minieap.pid}"
 LOG_FILE="${MINIEAP_LOG:-/var/log/minieap.log}"
 STATE_DIR=/var/run/ruijie-minieap
+POST_AUTH="${RUIJIE_DHCP_SCRIPT:-/usr/bin/ruijie-post-auth.sh}"
+PING_HOST="${RUIJIE_PING_HOST:-223.5.5.5}"
 
 log() { logger -t ruijie-minieap "$*"; echo "[ruijie-minieap] $*"; }
 
@@ -19,7 +25,6 @@ load_env() {
   [ -f "$ENV_FILE" ] || die "missing env file: $ENV_FILE (copy from /etc/ruijie/env.example)"
   # shellcheck disable=SC1090
   set -a
-  # strip CR, ignore comments/blank
   # shellcheck source=/dev/null
   . "$ENV_FILE"
   set +a
@@ -75,7 +80,6 @@ EOF
 }
 
 run_minieap() {
-  # $1 = extra daemonize flag args end: e.g. -b 0  or  -b 3 -w
   load_env
   check_minieap
   _dhcp_script="${RUIJIE_DHCP_SCRIPT:-/usr/bin/ruijie-post-auth.sh}"
@@ -104,13 +108,101 @@ is_running() {
   pidof minieap >/dev/null 2>&1
 }
 
+wan_ip() {
+  nic="${RUIJIE_NIC:-wan}"
+  ip -4 -o addr show "$nic" 2>/dev/null | awk '{print $4}' | head -1
+}
+
+has_default_route() {
+  ip route 2>/dev/null | grep -q '^default '
+}
+
+# Online: HTTP 204/200 or ping (campus may block ICMP)
+online_check() {
+  if command -v curl >/dev/null 2>&1; then
+    code=$(curl -4 -sS -m 6 -o /dev/null -w "%{http_code}" \
+      "http://connect.rom.miui.com/generate_204" 2>/dev/null || echo 000)
+    [ "$code" = "204" ] || [ "$code" = "200" ] && return 0
+    code=$(curl -4 -sS -m 6 -o /dev/null -w "%{http_code}" \
+      "https://www.baidu.com/" 2>/dev/null || echo 000)
+    [ "$code" = "200" ] || [ "$code" = "301" ] || [ "$code" = "302" ] && return 0
+  fi
+  ping -c 1 -W 3 "$PING_HOST" >/dev/null 2>&1
+}
+
+auth_success_recent() {
+  # last ~40 lines of minieap log contain success
+  [ -f "$LOG_FILE" ] || return 1
+  tail -n 40 "$LOG_FILE" 2>/dev/null | grep -q "认证成功"
+}
+
+wait_wan_link() {
+  load_env
+  nic="$RUIJIE_NIC"
+  i=0
+  while [ "$i" -lt 20 ]; do
+    if [ -d "/sys/class/net/$nic" ]; then
+      st=$(cat "/sys/class/net/$nic/operstate" 2>/dev/null || echo down)
+      if [ "$st" = "up" ] || [ "$st" = "unknown" ]; then
+        return 0
+      fi
+    fi
+    i=$((i + 1))
+    sleep 1
+  done
+  log "WARN: $nic link not up after 20s, continue anyway"
+  return 0
+}
+
+ensure_wan_up() {
+  load_env
+  nic="$RUIJIE_NIC"
+  wait_wan_link
+  # Do NOT network reload. Only ensure netifd interface is up.
+  if command -v ubus >/dev/null 2>&1; then
+    ubus call network.interface.wan up 2>/dev/null || true
+  fi
+  ifup wan 2>/dev/null || true
+  # wait for any IPv4 (pre-auth isolation IP is OK)
+  i=0
+  while [ "$i" -lt 15 ]; do
+    if ip -4 addr show "$nic" 2>/dev/null | grep -q "inet "; then
+      log "WAN has IPv4: $(wan_ip)"
+      return 0
+    fi
+    i=$((i + 1))
+    sleep 1
+  done
+  log "WARN: no IPv4 on $nic yet (auth may still work)"
+  return 0
+}
+
+run_post_auth() {
+  if [ -x "$POST_AUTH" ]; then
+    log "post-auth: run $POST_AUTH"
+    "$POST_AUTH" || true
+  else
+    log "post-auth: script missing, inline renew"
+    if command -v ubus >/dev/null 2>&1; then
+      ubus call network.interface.wan renew 2>/dev/null || true
+    fi
+    for p in $(pidof udhcpc 2>/dev/null); do
+      kill -USR1 "$p" 2>/dev/null || true
+    done
+  fi
+}
+
 do_stop() {
   check_minieap
   if [ -x "$MINIEAP_BIN" ]; then
     "$MINIEAP_BIN" -k 2>/dev/null || true
   fi
   killall minieap 2>/dev/null || true
-  # stuck D-state may remain until reboot; best effort
+  sleep 1
+  # stuck processes
+  if pidof minieap >/dev/null 2>&1; then
+    killall -9 minieap 2>/dev/null || true
+  fi
   rm -f "$PID_FILE"
   log "stopped"
 }
@@ -139,9 +231,8 @@ do_start() {
     log "started (pid=$(cat "$PID_FILE" 2>/dev/null || pidof minieap))"
     return 0
   fi
-  # some builds write log only
-  if grep -q "认证成功" "$LOG_FILE" 2>/dev/null; then
-    log "auth success seen in log"
+  if auth_success_recent; then
+    log "auth success seen in log (process may exit after auth on some builds)"
     return 0
   fi
   log "start may have failed; see $LOG_FILE"
@@ -155,12 +246,122 @@ do_restart() {
   do_start
 }
 
-online_check() {
-  # 204 = captive portal pass / online
-  code=$(curl -sS -m 6 -o /dev/null -w "%{http_code}" http://connect.rom.miui.com/generate_204 2>/dev/null || echo 000)
-  [ "$code" = "204" ] && return 0
-  # fallback: ping
-  ping -c 1 -W 3 223.5.5.5 >/dev/null 2>&1
+# ---------------------------------------------------------------------------
+# reauth: the one command for "authenticate + DHCP renew + verify online"
+# ---------------------------------------------------------------------------
+do_reauth() {
+  load_env
+  check_minieap
+  [ -f "$ENV_FILE" ] || die "missing $ENV_FILE"
+
+  log "======== reauth begin ========"
+  log "nic=$RUIJIE_NIC module=$RUIJIE_MODULE eap-bcast=$RUIJIE_EAP_BCAST dhcp-type=$RUIJIE_DHCP_TYPE"
+  log "before: ip=$(wan_ip) default=$(ip route 2>/dev/null | awk '/^default/{print; exit}')"
+
+  # 1) clean single instance (avoid PID races)
+  do_stop
+  sleep 1
+
+  # 2) WAN link + pre-auth DHCP only (never /etc/init.d/network reload)
+  ensure_wan_up
+
+  # 3) mark log for success detection
+  mkdir -p "$(dirname "$LOG_FILE")"
+  : >> "$LOG_FILE"
+  marker=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
+
+  # 4) start minieap once
+  render_conf
+  mkdir -p "$(dirname "$PID_FILE")"
+  log "starting minieap..."
+  run_minieap -b 3 -w || true
+
+  # 5) wait for 认证成功 (up to ~50s)
+  auth_ok=0
+  i=0
+  while [ "$i" -lt 25 ]; do
+    if [ -f "$LOG_FILE" ]; then
+      # lines after marker
+      if tail -n +$((marker + 1)) "$LOG_FILE" 2>/dev/null | grep -q "认证成功"; then
+        auth_ok=1
+        log "802.1x auth success"
+        break
+      fi
+      # failure hints
+      if tail -n +$((marker + 1)) "$LOG_FILE" 2>/dev/null | grep -qE "认证失败|Connection timed out|无法启动"; then
+        log "auth failed (see log)"
+        tail -n 20 "$LOG_FILE" 2>/dev/null || true
+        break
+      fi
+    fi
+    i=$((i + 1))
+    sleep 2
+  done
+
+  if [ "$auth_ok" != "1" ]; then
+    # one more try: clean restart minieap
+    log "no success yet, retry minieap once"
+    do_stop
+    sleep 2
+    ensure_wan_up
+    marker=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
+    run_minieap -b 3 -w || true
+    i=0
+    while [ "$i" -lt 20 ]; do
+      if tail -n +$((marker + 1)) "$LOG_FILE" 2>/dev/null | grep -q "认证成功"; then
+        auth_ok=1
+        log "802.1x auth success (retry)"
+        break
+      fi
+      i=$((i + 1))
+      sleep 2
+    done
+  fi
+
+  if [ "$auth_ok" != "1" ]; then
+    log "ERROR: 802.1x did not succeed"
+    tail -n 30 "$LOG_FILE" 2>/dev/null || true
+    do_status
+    return 1
+  fi
+
+  # 6) post-auth DHCP (critical: leave 172.23 isolation net)
+  # minieap dhcp-script may also fire; we always run explicitly
+  sleep 2
+  run_post_auth
+  sleep 4
+  run_post_auth
+  sleep 3
+
+  # 7) if minieap exited after auth, start keepalive again (no link flap)
+  if ! is_running; then
+    log "minieap exited after auth; start keepalive"
+    run_minieap -b 3 -w || true
+    sleep 2
+  fi
+
+  # 8) wait online (up to ~40s)
+  i=0
+  while [ "$i" -lt 10 ]; do
+    if online_check; then
+      log "======== reauth OK online ip=$(wan_ip) ========"
+      do_status
+      return 0
+    fi
+    # still offline: another soft renew (avoid wan down if possible)
+    if [ "$i" = "3" ] || [ "$i" = "6" ]; then
+      log "still offline, post-auth again ($i)"
+      run_post_auth
+    fi
+    i=$((i + 1))
+    sleep 4
+  done
+
+  log "======== reauth DONE but network still offline ========"
+  log "after: ip=$(wan_ip)"
+  log "tip: if still 172.23.x, DHCP did not leave isolation net; check switch/session"
+  do_status
+  return 1
 }
 
 do_status() {
@@ -196,7 +397,6 @@ do_verify() {
     do_start || true
     sleep 3
   fi
-  # wait up to ~30s for online
   i=0
   while [ "$i" -lt 10 ]; do
     if online_check; then
@@ -221,8 +421,19 @@ case "$cmd" in
   login)   do_login ;;
   verify|test) do_verify ;;
   render-conf|render) render_conf ;;
+  reauth|re-auth|fix) do_reauth ;;
+  post-auth|renew)
+    load_env
+    run_post_auth
+    sleep 2
+    do_status
+    ;;
   *)
-    echo "usage: $0 {start|stop|restart|status|login|verify|render-conf}"
+    echo "usage: $0 {start|stop|restart|status|login|verify|render-conf|reauth|post-auth}"
+    echo ""
+    echo "  reauth     one command: 802.1x + WAN DHCP renew + online check  (recommended)"
+    echo "  post-auth  only force WAN DHCP renew after auth"
+    echo "  restart    only restart minieap (may leave you on pre-auth IP)"
     exit 2
     ;;
 esac

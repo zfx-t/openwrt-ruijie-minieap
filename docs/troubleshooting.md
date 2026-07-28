@@ -20,32 +20,50 @@ grep ARCH /etc/openwrt_release
 
 **典型现象：**
 
-- `minieap` 日志有「认证成功」，进程也在跑  
+- `minieap` 日志有「认证成功」，进程也在跑（或认证后马上退出）  
 - WAN 仍是认证前隔离地址（如 `172.23.x.x`），外网 ping 不通  
 - 手动 `ubus call network.interface.wan renew` 或 `ifup wan` 后 IP 变成可上网段（如 `172.20.x.x`）并恢复  
 
-**原因：** 开机时 OpenWrt 先 DHCP 到隔离 IP；802.1x 成功后 **netifd 不会自动换租**，一直占着旧地址。
+**原因：** 开机时 OpenWrt 先 DHCP 到隔离 IP；802.1x 成功后 **netifd 不会自动换租**，一直占着旧地址。  
+**`restart` 只重启 minieap，不等于完成 DHCP 换段。**
 
 **本仓库处理：**
 
-- `ruijie-post-auth.sh`：认证后强制 WAN 续租  
+- `ruijie-post-auth.sh`：认证后强制 WAN 软续租（优先 `ubus renew` + udhcpc USR1）  
 - minieap `-c` / `dhcp-script` 调用该脚本  
-- 开机启动后若仍离线会再续租/重拨一次  
+- **`ruijie-reauth` / `ruijie-minieap-ctl reauth`**：认证 + 多次 post-auth + 在线检测（推荐）  
+- 看门狗离线时走 `reauth`  
 
-手动修复：
+手动修复（优先）：
 
 ```bash
+ruijie-reauth
+# 或分步：
 /usr/bin/ruijie-post-auth.sh
 # 或
 ubus call network.interface.wan renew
-# 或
-/etc/init.d/ruijie-minieap restart; sleep 8; /usr/bin/ruijie-post-auth.sh
 ```
 
 同时确认防火墙 WAN masq：
 
 ```bash
 uci show firewall | grep masq
+```
+
+## 为什么 restart 不够、要用 reauth
+
+| 命令 | 做什么 |
+|------|--------|
+| `restart` | 停/启 minieap → 可能 802.1x 成功，**不一定**换到正式 IP |
+| `post-auth` | **只** WAN DHCP 续租（需已经认证过） |
+| **`reauth`** | 停干净 → 认证 → post-auth 续租 → 检测在线 |
+
+判断是否卡在隔离网段：
+
+```bash
+ip -4 addr show wan
+# 仍是 172.23.x → 需要 post-auth / reauth
+# 已是 172.20.x 仍不通 → 查路由/DNS/防火墙
 ```
 
 ## 认证成功后 IP 变了
@@ -78,10 +96,9 @@ tail -80 /overlay/ruijie-net.log
 2. 手动一次：
 
 ```bash
-ruijie-net-watchdog.sh once
+ruijie-reauth
 # 或
-/etc/init.d/ruijie-minieap restart
-/usr/bin/ruijie-post-auth.sh
+ruijie-net-watchdog.sh once
 ```
 
 3. 仍失败再抓 snapshot：

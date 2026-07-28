@@ -29,7 +29,8 @@ openwrt-ruijie-minieap/
 │   │   ├── init.d/ruijie-minieap   # 开机服务 (procd)
 │   │   └── ruijie/env.example
 │   └── usr/bin/
-│       ├── ruijie-minieap-ctl      # 启停/状态/验证
+│       ├── ruijie-minieap-ctl      # 启停/状态/验证/reauth
+│       ├── ruijie-reauth           # 一键：认证 + DHCP（ctl reauth 别名）
 │       ├── ruijie-post-auth.sh     # 认证后 WAN DHCP 续租
 │       └── ruijie-net-watchdog.sh  # 掉线检测 + 自动恢复 + 持久日志
 ├── scripts/verify.sh
@@ -87,11 +88,38 @@ RUIJIE_USERNAME=学号 RUIJIE_PASSWORD=密码 sh install.sh --start --verify
 
 ## 日常命令
 
+### 一键重新认证 + DHCP（推荐）
+
+断网、卡在隔离 IP（如 `172.23.x`）、或觉得 `restart` 没用时，**只跑这一条**：
+
+```bash
+ruijie-reauth
+# 等价：
+ruijie-minieap-ctl reauth
+```
+
+流程：
+
+1. 干净停掉旧 minieap（避免多实例/PID 冲突）  
+2. 确保 WAN 链路 up（**不会** `network reload`）  
+3. 802.1x 认证，等待日志「认证成功」  
+4. 多次调用 `ruijie-post-auth.sh` 做 WAN DHCP 续租（隔离网段 → 正式网段）  
+5. 若进程退出则再拉起 keep-alive  
+6. 检测是否在线并打印 `status`
+
+仅续租、不再认证：
+
+```bash
+ruijie-minieap-ctl post-auth
+```
+
+### 其它
+
 ```bash
 ruijie-minieap-ctl status    # 进程 + 是否在线
 ruijie-minieap-ctl start     # 后台认证
 ruijie-minieap-ctl stop
-ruijie-minieap-ctl restart
+ruijie-minieap-ctl restart   # 只重启 minieap（可能仍停在隔离 IP）
 ruijie-minieap-ctl verify    # 拉起并检测 generate_204 / ping
 ruijie-minieap-ctl render-conf
 
@@ -101,7 +129,7 @@ ruijie-minieap-ctl render-conf
 /etc/init.d/ruijie-minieap restart
 
 # 掉线看门狗（install.sh 会装 cron：每 2 分钟检测、每 5 分钟收割日志）
-ruijie-net-watchdog.sh once       # 检测；离线则 restart minieap + post-auth
+ruijie-net-watchdog.sh once       # 离线则自动 reauth
 ruijie-net-watchdog.sh snapshot   # 把现场写入持久日志
 ruijie-net-watchdog.sh harvest    # 从 logread 摘 wan/minieap 行
 tail -50 /overlay/ruijie-net.log  # 持久日志（重启不丢）
@@ -175,7 +203,7 @@ tail -50 /overlay/ruijie-net.log  # 持久日志（重启不丢）
 | cron | 每 **2 分钟** `once`；每 **5 分钟** `harvest` |
 | 持久日志 | `/overlay/ruijie-net.log`（约 200KB 滚动） |
 
-离线时自动：写 snapshot → `/etc/init.d/ruijie-minieap restart` → `ruijie-post-auth.sh`（必要时再续租一次）。  
+离线时自动：写 snapshot → **`ruijie-minieap-ctl reauth`**（认证 + DHCP + 在线检测）。  
 用于覆盖：会话掉线、卡在隔离 IP（如 `172.23.x`）未 renew 到正式网段等情况。
 
 ## 原理（简要）
@@ -183,8 +211,9 @@ tail -50 /overlay/ruijie-net.log  # 持久日志（重启不丢）
 1. 交换机对 WAN 口做 **802.1x**，需锐捷私有 EAP 扩展（RJv3）。  
 2. `minieap` 在 `wan` 上发 EAPOL，账号校验成功后可选 DHCP。  
 3. OpenWrt **NAT/masquerade** 把 LAN/WiFi 流量从已认证 WAN 出去。  
-4. 认证后若仍停在隔离网段，由 **post-auth 续租** + **net-watchdog** 拉回。  
-5. 网页 Portal 劫持有时仍存在，但 **真正放行的是 802.1x**（本仓库路径）。
+4. 认证前常为 **隔离网段**（如 `172.23.x`）；认证后必须 **DHCP 续租** 到正式段（如 `172.20.x`）。  
+5. **`ruijie-post-auth.sh`** 只做第 4 步；**`ruijie-reauth`** = 第 2 步 + 第 4 步 + 检测。  
+6. 裸 `restart` 往往只做第 2 步，所以会出现「日志认证成功但上不了网」。
 
 官方 Linux 客户端（RG-SU）仅 x86/x64；路由器 mips 用 minieap 等价实现。
 
