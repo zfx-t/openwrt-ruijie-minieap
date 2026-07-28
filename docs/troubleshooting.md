@@ -27,22 +27,25 @@ grep ARCH /etc/openwrt_release
 **原因：** 开机时 OpenWrt 先 DHCP 到隔离 IP；802.1x 成功后 **netifd 不会自动换租**，一直占着旧地址。  
 **`restart` 只重启 minieap，不等于完成 DHCP 换段。**
 
-**本仓库处理：**
+**本仓库处理（稳定版）：**
 
-- `ruijie-post-auth.sh`：认证后强制 WAN 软续租（优先 `ubus renew` + udhcpc USR1）  
-- minieap `-c` / `dhcp-script` 调用该脚本  
-- **`ruijie-reauth` / `ruijie-minieap-ctl reauth`**：认证 + 多次 post-auth + 在线检测（推荐）  
-- 看门狗离线时走 `reauth`  
+- 默认 **`RUIJIE_DHCP_TYPE=0`**：minieap 只保活，不抢 DHCP  
+- **无** minieap `-c dhcp-script`（避免与 udhcpc 竞态）  
+- `ruijie-post-auth.sh`：**只软续租**（`ubus renew` + USR1），默认 **不 ifdown**  
+- init.d：**不**监听 `network` reload 触发（renew 不会重启 802.1x）  
+- 看门狗：软恢复，**不**每 2 分钟 full reauth  
 
-手动修复（优先）：
+手动修复（由轻到重）：
 
 ```bash
-ruijie-reauth
-# 或分步：
+/usr/bin/ruijie-post-auth.sh          # 软续租
+/etc/init.d/ruijie-minieap restart    # 进程/会话问题
 /usr/bin/ruijie-post-auth.sh
-# 或
-ubus call network.interface.wan renew
+# 仍不行再：
+ruijie-reauth
 ```
+
+**禁止：** `/etc/init.d/network reload`、`RUIJIE_POST_AUTH_HARD=1`（除非你清楚风险）。
 
 同时确认防火墙 WAN masq：
 
@@ -50,20 +53,35 @@ ubus call network.interface.wan renew
 uci show firewall | grep masq
 ```
 
-## 为什么 restart 不够、要用 reauth
+## 为什么 minieap 一直退出
+
+常见叠加原因：
+
+1. `dhcp-type=2` + dhcp-script → 认证后退出 / 与 udhcpc 抢租约  
+2. post-auth **ifdown** → 链路抖 → 会话掉 → 进程退  
+3. 看门狗每 2 分钟 **reauth** → 反复 stop/start  
+4. procd `reload_trigger network` → 每次 WAN renew 重启服务  
+
+稳定默认已规避 1–4。若仍退出：
+
+```bash
+ps | grep minieap
+tail -30 /var/log/minieap.log
+grep RUIJIE_DHCP /etc/ruijie/env   # 应为 0
+```
+
+## 命令对照
 
 | 命令 | 做什么 |
 |------|--------|
-| `restart` | 停/启 minieap → 可能 802.1x 成功，**不一定**换到正式 IP |
-| `post-auth` | **只** WAN DHCP 续租（需已经认证过） |
-| **`reauth`** | 停干净 → 认证 → post-auth 续租 → 检测在线 |
-
-判断是否卡在隔离网段：
+| `post-auth` | 只软 WAN DHCP 续租 |
+| `restart` | 重启 minieap 服务（温和） |
+| `reauth` | stop → 认证 → 软续租 → 检测（少用） |
 
 ```bash
 ip -4 addr show wan
-# 仍是 172.23.x → 需要 post-auth / reauth
-# 已是 172.20.x 仍不通 → 查路由/DNS/防火墙
+# 172.23.x → 隔离，跑 post-auth
+# 172.20.x → 正式段；仍不通查 DNS/路由
 ```
 
 ## 认证成功后 IP 变了

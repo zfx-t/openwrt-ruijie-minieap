@@ -51,26 +51,33 @@ ls -l /etc/rc.d/S99ruijie-minieap
 /etc/init.d/ruijie-minieap enabled && echo enabled
 ```
 
-## 日常重新认证（一条命令）
+## 日常恢复（由轻到重）
 
 ```bash
+# 软续租（优先）
+/usr/bin/ruijie-post-auth.sh
+
+# 进程/会话
+/etc/init.d/ruijie-minieap restart
+/usr/bin/ruijie-post-auth.sh
+
+# 彻底重来（少用）
 ruijie-reauth
-# 等价：ruijie-minieap-ctl reauth
 ```
 
-会完成：停旧进程 → 802.1x → post-auth DHCP 续租 → 在线检测。  
-卡在隔离 IP（如 `172.23.x`）或觉得 `restart` 没用时优先用它。
+默认 `RUIJIE_DHCP_TYPE=0`：minieap 保活，DHCP 交给 OpenWrt 软 post-auth。  
+**不要** `network reload`。
 
 ## 掉线看门狗（随 install 一起装）
 
 `install.sh` 会：
 
-1. 安装 `/usr/bin/ruijie-net-watchdog.sh`
-2. 写入 cron（幂等，重复安装会先删旧行）：
+1. 安装 `/usr/bin/ruijie-net-watchdog.sh`（软恢复，不循环 reauth）
+2. 写入 cron（幂等；默认每 5 分钟 once、每 10 分钟 harvest）：
 
 ```cron
-*/2 * * * * /usr/bin/ruijie-net-watchdog.sh once
-*/5 * * * * /usr/bin/ruijie-net-watchdog.sh harvest
+*/5 * * * * /usr/bin/ruijie-net-watchdog.sh once
+*/10 * * * * /usr/bin/ruijie-net-watchdog.sh harvest
 ```
 
 3. `cron` enable + restart  
@@ -78,7 +85,7 @@ ruijie-reauth
 
 | 命令 | 作用 |
 |------|------|
-| `once` | 探测 `generate_204` / ping；离线则 restart minieap + post-auth |
+| `once` | 探测在线；离线则 start / 软 post-auth / 至多一次 restart（不循环 reauth） |
 | `harvest` | 把 `logread` 中 wan/minieap 相关行 append 到持久日志 |
 | `snapshot` | 完整现场（ip/route/status/logread）写入日志 |
 | `loop` | 前台循环（一般用 cron 即可） |

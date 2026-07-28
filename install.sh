@@ -149,17 +149,17 @@ install_net_watchdog() {
     sed -i '/ruijie-net-watchdog/d' "$CRON" 2>/dev/null || true
   fi
   cat >> "$CRON" <<'EOF'
-# ruijie-net-watchdog: offline auto-recover + persistent log
-*/2 * * * * /usr/bin/ruijie-net-watchdog.sh once
-*/5 * * * * /usr/bin/ruijie-net-watchdog.sh harvest
+# ruijie-net-watchdog: soft offline recover + persistent log (avoid 2m reauth thrash)
+*/5 * * * * /usr/bin/ruijie-net-watchdog.sh once
+*/10 * * * * /usr/bin/ruijie-net-watchdog.sh harvest
 EOF
   if [ -x /etc/init.d/cron ]; then
     /etc/init.d/cron enable 2>/dev/null || true
     /etc/init.d/cron restart 2>/dev/null || true
   fi
-  # seed log file (overlay survives reboot)
+  # seed log file (overlay survives reboot) — soft once only
   /usr/bin/ruijie-net-watchdog.sh once 2>/dev/null || true
-  echo "==> net watchdog cron installed (every 2m check, 5m log harvest)"
+  echo "==> net watchdog cron installed (every 5m soft check, 10m log harvest)"
   echo "    log: /overlay/ruijie-net.log"
 }
 
