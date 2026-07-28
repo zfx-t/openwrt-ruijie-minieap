@@ -1,4 +1,0 @@
-#!/bin/sh
-# One-command alias: 802.1x re-auth + WAN DHCP renew + online check
-# Same as: ruijie-minieap-ctl reauth
-exec /usr/bin/ruijie-minieap-ctl reauth "$@"

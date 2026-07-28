@@ -1,14 +1,6 @@
 #!/bin/sh
-# Ruijie / minieap control:
-#   start|stop|restart|status|login|verify|render-conf|reauth|post-auth
-# Credentials: /etc/ruijie/env (or RUIJIE_ENV).
-#
-# Defaults (stable):
-#   RUIJIE_DHCP_TYPE=0  — minieap Keep-Alive only; OpenWrt owns DHCP
-#   post-auth is SOFT renew (no ifdown)
-#
-# reauth = stop → start 802.1x → soft post-auth → online check
-# Prefer service restart + post-auth for mild issues; use reauth when stuck.
+# Ruijie / minieap control: start|stop|restart|status|login|verify|render-conf
+# Credentials and options come from /etc/ruijie/env (or RUIJIE_ENV).
 
 set -e
 
@@ -18,8 +10,6 @@ CONF_FILE="${MINIEAP_CONF:-/etc/minieap.conf}"
 PID_FILE="${MINIEAP_PID:-/var/run/minieap.pid}"
 LOG_FILE="${MINIEAP_LOG:-/var/log/minieap.log}"
 STATE_DIR=/var/run/ruijie-minieap
-POST_AUTH="${RUIJIE_POST_AUTH:-/usr/bin/ruijie-post-auth.sh}"
-PING_HOST="${RUIJIE_PING_HOST:-223.5.5.5}"
 
 log() { logger -t ruijie-minieap "$*"; echo "[ruijie-minieap] $*"; }
 
@@ -29,6 +19,7 @@ load_env() {
   [ -f "$ENV_FILE" ] || die "missing env file: $ENV_FILE (copy from /etc/ruijie/env.example)"
   # shellcheck disable=SC1090
   set -a
+  # strip CR, ignore comments/blank
   # shellcheck source=/dev/null
   . "$ENV_FILE"
   set +a
@@ -37,8 +28,7 @@ load_env() {
   : "${RUIJIE_PASSWORD:?RUIJIE_PASSWORD required in $ENV_FILE}"
   RUIJIE_NIC="${RUIJIE_NIC:-wan}"
   RUIJIE_EAP_BCAST="${RUIJIE_EAP_BCAST:-1}"
-  # 0 = keepalive only (recommended with OpenWrt udhcpc + soft post-auth)
-  RUIJIE_DHCP_TYPE="${RUIJIE_DHCP_TYPE:-0}"
+  RUIJIE_DHCP_TYPE="${RUIJIE_DHCP_TYPE:-2}"
   RUIJIE_SERVICE="${RUIJIE_SERVICE:-internet}"
   RUIJIE_VERSION_STR="${RUIJIE_VERSION_STR:-RG-SU For Linux V1.31}"
   RUIJIE_FAKE_SERIAL="${RUIJIE_FAKE_SERIAL:-OPENWRT-001}"
@@ -51,7 +41,6 @@ check_minieap() {
 }
 
 # Render /etc/minieap.conf from env (no secrets in git)
-# Note: procd service does not use this conf for -c; it is for manual runs.
 render_conf() {
   load_env
   mkdir -p "$(dirname "$CONF_FILE")" "$STATE_DIR"
@@ -78,16 +67,18 @@ service=$RUIJIE_SERVICE
 version-str=$RUIJIE_VERSION_STR
 fake-serial=$RUIJIE_FAKE_SERIAL
 max-dhcp-count=3
-# dhcp-script intentionally omitted: OpenWrt soft post-auth owns renew
+# after auth: refresh OpenWrt WAN lease (isolated pre-auth IP -> real IP)
+dhcp-script=${RUIJIE_DHCP_SCRIPT:-/usr/bin/ruijie-post-auth.sh}
 EOF
   chmod 600 "$CONF_FILE"
   log "wrote $CONF_FILE (nic=$RUIJIE_NIC eap-bcast=$RUIJIE_EAP_BCAST dhcp=$RUIJIE_DHCP_TYPE)"
 }
 
 run_minieap() {
+  # $1 = extra daemonize flag args end: e.g. -b 0  or  -b 3 -w
   load_env
   check_minieap
-  # no -c dhcp-script by default (stable)
+  _dhcp_script="${RUIJIE_DHCP_SCRIPT:-/usr/bin/ruijie-post-auth.sh}"
   # shellcheck disable=SC2086
   "$MINIEAP_BIN" -k 1 \
     -u "$RUIJIE_USERNAME" \
@@ -100,6 +91,7 @@ run_minieap() {
     --version-str "$RUIJIE_VERSION_STR" \
     --service "$RUIJIE_SERVICE" \
     --fake-serial "$RUIJIE_FAKE_SERIAL" \
+    -c "$_dhcp_script" \
     -t 8 --max-retries 3 \
     "$@"
 }
@@ -112,57 +104,18 @@ is_running() {
   pidof minieap >/dev/null 2>&1
 }
 
-wan_ip() {
-  nic="${RUIJIE_NIC:-wan}"
-  ip -4 -o addr show "$nic" 2>/dev/null | awk '{print $4}' | head -1
-}
-
-online_check() {
-  if command -v curl >/dev/null 2>&1; then
-    code=$(curl -4 -sS -m 6 -o /dev/null -w "%{http_code}" \
-      "http://connect.rom.miui.com/generate_204" 2>/dev/null || echo 000)
-    [ "$code" = "204" ] || [ "$code" = "200" ] && return 0
-    code=$(curl -4 -sS -m 6 -o /dev/null -w "%{http_code}" \
-      "https://www.baidu.com/" 2>/dev/null || echo 000)
-    [ "$code" = "200" ] || [ "$code" = "301" ] || [ "$code" = "302" ] && return 0
-  fi
-  ping -c 1 -W 3 "$PING_HOST" >/dev/null 2>&1
-}
-
-auth_success_recent() {
-  [ -f "$LOG_FILE" ] || return 1
-  tail -n 40 "$LOG_FILE" 2>/dev/null | grep -q "认证成功"
-}
-
-run_post_auth() {
-  if [ -x "$POST_AUTH" ]; then
-    log "post-auth: run $POST_AUTH"
-    "$POST_AUTH" || true
-  else
-    log "post-auth: inline soft renew"
-    if command -v ubus >/dev/null 2>&1; then
-      ubus call network.interface.wan renew 2>/dev/null || true
-    fi
-    for p in $(pidof udhcpc 2>/dev/null); do
-      kill -USR1 "$p" 2>/dev/null || true
-    done
-  fi
-}
-
 do_stop() {
   check_minieap
   if [ -x "$MINIEAP_BIN" ]; then
     "$MINIEAP_BIN" -k 2>/dev/null || true
   fi
   killall minieap 2>/dev/null || true
-  sleep 1
-  if pidof minieap >/dev/null 2>&1; then
-    killall -9 minieap 2>/dev/null || true
-  fi
+  # stuck D-state may remain until reboot; best effort
   rm -f "$PID_FILE"
   log "stopped"
 }
 
+# One-shot foreground login (blocks until success or fail)
 do_login() {
   render_conf
   do_stop
@@ -171,29 +124,23 @@ do_login() {
   run_minieap -b 0 || return 1
 }
 
+# Background keep-alive (for init / manual)
 do_start() {
-  # Prefer procd service when available (Keep-Alive under supervision)
-  if [ -x /etc/init.d/ruijie-minieap ]; then
-    /etc/init.d/ruijie-minieap start 2>/dev/null || true
-    sleep 2
-    if is_running; then
-      log "started via procd"
-      return 0
-    fi
-  fi
   render_conf
   if is_running; then
     log "already running"
     return 0
   fi
   mkdir -p "$(dirname "$LOG_FILE")" "$(dirname "$PID_FILE")"
+  # -b 3: daemonize to log file; -w save conf
   run_minieap -b 3 -w || true
   sleep 2
   if is_running; then
     log "started (pid=$(cat "$PID_FILE" 2>/dev/null || pidof minieap))"
     return 0
   fi
-  if auth_success_recent; then
+  # some builds write log only
+  if grep -q "认证成功" "$LOG_FILE" 2>/dev/null; then
     log "auth success seen in log"
     return 0
   fi
@@ -203,86 +150,17 @@ do_start() {
 }
 
 do_restart() {
-  if [ -x /etc/init.d/ruijie-minieap ]; then
-    /etc/init.d/ruijie-minieap restart 2>/dev/null || true
-    sleep 2
-    return 0
-  fi
   do_stop
   sleep 1
   do_start
 }
 
-# One-shot: auth + soft DHCP + online check (use sparingly; prefer restart+post-auth)
-do_reauth() {
-  load_env
-  check_minieap
-  log "======== reauth begin ========"
-  log "nic=$RUIJIE_NIC d=$RUIJIE_DHCP_TYPE before_ip=$(wan_ip)"
-
-  do_stop
-  sleep 1
-
-  # ensure wan is up without network reload
-  if command -v ubus >/dev/null 2>&1; then
-    ubus call network.interface.wan up 2>/dev/null || true
-  fi
-  ifup wan 2>/dev/null || true
-  sleep 2
-
-  mkdir -p "$(dirname "$LOG_FILE")"
-  : >> "$LOG_FILE"
-  marker=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
-
-  do_start
-  sleep 2
-
-  auth_ok=0
-  i=0
-  while [ "$i" -lt 20 ]; do
-    if [ -f "$LOG_FILE" ] && tail -n +$((marker + 1)) "$LOG_FILE" 2>/dev/null | grep -q "认证成功"; then
-      auth_ok=1
-      log "802.1x auth success"
-      break
-    fi
-    if is_running && [ "$i" -gt 8 ]; then
-      # process alive with d=0 may log slowly; try soft renew anyway
-      :
-    fi
-    i=$((i + 1))
-    sleep 2
-  done
-
-  # soft post-auth always (critical for leaving 172.23 isolation)
-  sleep 2
-  run_post_auth
-  sleep 4
-  run_post_auth
-  sleep 3
-
-  if ! is_running; then
-    log "minieap not running after auth; start again for keepalive"
-    do_start
-  fi
-
-  i=0
-  while [ "$i" -lt 8 ]; do
-    if online_check; then
-      log "======== reauth OK online ip=$(wan_ip) ========"
-      do_status
-      return 0
-    fi
-    if [ "$i" = "2" ] || [ "$i" = "5" ]; then
-      run_post_auth
-    fi
-    i=$((i + 1))
-    sleep 3
-  done
-
-  log "======== reauth finished; network still offline ip=$(wan_ip) ========"
-  do_status
-  [ "$auth_ok" = "1" ] && return 1
-  return 1
+online_check() {
+  # 204 = captive portal pass / online
+  code=$(curl -sS -m 6 -o /dev/null -w "%{http_code}" http://connect.rom.miui.com/generate_204 2>/dev/null || echo 000)
+  [ "$code" = "204" ] && return 0
+  # fallback: ping
+  ping -c 1 -W 3 223.5.5.5 >/dev/null 2>&1
 }
 
 do_status() {
@@ -316,9 +194,9 @@ do_verify() {
   if ! is_running; then
     log "not running, starting..."
     do_start || true
-    sleep 5
-    run_post_auth
+    sleep 3
   fi
+  # wait up to ~30s for online
   i=0
   while [ "$i" -lt 10 ]; do
     if online_check; then
@@ -343,19 +221,8 @@ case "$cmd" in
   login)   do_login ;;
   verify|test) do_verify ;;
   render-conf|render) render_conf ;;
-  reauth|re-auth|fix) do_reauth ;;
-  post-auth|renew)
-    load_env 2>/dev/null || true
-    run_post_auth
-    sleep 2
-    do_status
-    ;;
   *)
-    echo "usage: $0 {start|stop|restart|status|login|verify|render-conf|reauth|post-auth}"
-    echo ""
-    echo "  reauth     802.1x + soft DHCP renew + online check"
-    echo "  post-auth  soft WAN DHCP renew only (no ifdown)"
-    echo "  restart    procd/service restart (milder than reauth)"
+    echo "usage: $0 {start|stop|restart|status|login|verify|render-conf}"
     exit 2
     ;;
 esac

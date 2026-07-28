@@ -37,11 +37,10 @@ mkdir -p /etc/ruijie /usr/bin /etc/init.d /var/log /etc/crontabs
 cp -f "$FILES/usr/bin/ruijie-minieap-ctl" /usr/bin/ruijie-minieap-ctl
 cp -f "$FILES/usr/bin/ruijie-post-auth.sh" /usr/bin/ruijie-post-auth.sh
 cp -f "$FILES/usr/bin/ruijie-net-watchdog.sh" /usr/bin/ruijie-net-watchdog.sh
-cp -f "$FILES/usr/bin/ruijie-reauth" /usr/bin/ruijie-reauth
 cp -f "$FILES/etc/init.d/ruijie-minieap" /etc/init.d/ruijie-minieap
 cp -f "$FILES/etc/ruijie/env.example" /etc/ruijie/env.example
 chmod +x /usr/bin/ruijie-minieap-ctl /usr/bin/ruijie-post-auth.sh \
-  /usr/bin/ruijie-net-watchdog.sh /usr/bin/ruijie-reauth /etc/init.d/ruijie-minieap
+  /usr/bin/ruijie-net-watchdog.sh /etc/init.d/ruijie-minieap
 
 if [ -n "$FROM_ENV" ]; then
   [ -f "$FROM_ENV" ] || { echo "env file not found: $FROM_ENV"; exit 1; }
@@ -149,17 +148,17 @@ install_net_watchdog() {
     sed -i '/ruijie-net-watchdog/d' "$CRON" 2>/dev/null || true
   fi
   cat >> "$CRON" <<'EOF'
-# ruijie-net-watchdog: soft offline recover + persistent log (avoid 2m reauth thrash)
-*/5 * * * * /usr/bin/ruijie-net-watchdog.sh once
-*/10 * * * * /usr/bin/ruijie-net-watchdog.sh harvest
+# ruijie-net-watchdog: offline auto-recover + persistent log
+*/2 * * * * /usr/bin/ruijie-net-watchdog.sh once
+*/5 * * * * /usr/bin/ruijie-net-watchdog.sh harvest
 EOF
   if [ -x /etc/init.d/cron ]; then
     /etc/init.d/cron enable 2>/dev/null || true
     /etc/init.d/cron restart 2>/dev/null || true
   fi
-  # seed log file (overlay survives reboot) — soft once only
+  # seed log file (overlay survives reboot)
   /usr/bin/ruijie-net-watchdog.sh once 2>/dev/null || true
-  echo "==> net watchdog cron installed (every 5m soft check, 10m log harvest)"
+  echo "==> net watchdog cron installed (every 2m check, 5m log harvest)"
   echo "    log: /overlay/ruijie-net.log"
 }
 
@@ -181,8 +180,7 @@ fi
 echo ""
 echo "Install done."
 echo "  env:      /etc/ruijie/env"
-echo "  reauth:   ruijie-reauth   # or: ruijie-minieap-ctl reauth"
-echo "  ctl:      ruijie-minieap-ctl {start|stop|status|verify|reauth|post-auth}"
+echo "  ctl:      ruijie-minieap-ctl {start|stop|status|verify}"
 echo "  service:  /etc/init.d/ruijie-minieap {start|stop|enable|disable}"
 echo "  watchdog: ruijie-net-watchdog.sh {once|loop|snapshot|harvest}"
 echo "  net log:  /overlay/ruijie-net.log"

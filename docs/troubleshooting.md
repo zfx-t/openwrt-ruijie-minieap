@@ -20,68 +20,32 @@ grep ARCH /etc/openwrt_release
 
 **典型现象：**
 
-- `minieap` 日志有「认证成功」，进程也在跑（或认证后马上退出）  
+- `minieap` 日志有「认证成功」，进程也在跑  
 - WAN 仍是认证前隔离地址（如 `172.23.x.x`），外网 ping 不通  
 - 手动 `ubus call network.interface.wan renew` 或 `ifup wan` 后 IP 变成可上网段（如 `172.20.x.x`）并恢复  
 
-**原因：** 开机时 OpenWrt 先 DHCP 到隔离 IP；802.1x 成功后 **netifd 不会自动换租**，一直占着旧地址。  
-**`restart` 只重启 minieap，不等于完成 DHCP 换段。**
+**原因：** 开机时 OpenWrt 先 DHCP 到隔离 IP；802.1x 成功后 **netifd 不会自动换租**，一直占着旧地址。
 
-**本仓库处理（稳定版）：**
+**本仓库处理：**
 
-- 默认 **`RUIJIE_DHCP_TYPE=0`**：minieap 只保活，不抢 DHCP  
-- **无** minieap `-c dhcp-script`（避免与 udhcpc 竞态）  
-- `ruijie-post-auth.sh`：**只软续租**（`ubus renew` + USR1），默认 **不 ifdown**  
-- init.d：**不**监听 `network` reload 触发（renew 不会重启 802.1x）  
-- 看门狗：软恢复，**不**每 2 分钟 full reauth  
+- `ruijie-post-auth.sh`：认证后强制 WAN 续租  
+- minieap `-c` / `dhcp-script` 调用该脚本  
+- 开机启动后若仍离线会再续租/重拨一次  
 
-手动修复（由轻到重）：
+手动修复：
 
 ```bash
-/usr/bin/ruijie-post-auth.sh          # 软续租
-/etc/init.d/ruijie-minieap restart    # 进程/会话问题
 /usr/bin/ruijie-post-auth.sh
-# 仍不行再：
-ruijie-reauth
+# 或
+ubus call network.interface.wan renew
+# 或
+/etc/init.d/ruijie-minieap restart; sleep 8; /usr/bin/ruijie-post-auth.sh
 ```
-
-**禁止：** `/etc/init.d/network reload`、`RUIJIE_POST_AUTH_HARD=1`（除非你清楚风险）。
 
 同时确认防火墙 WAN masq：
 
 ```bash
 uci show firewall | grep masq
-```
-
-## 为什么 minieap 一直退出
-
-常见叠加原因：
-
-1. `dhcp-type=2` + dhcp-script → 认证后退出 / 与 udhcpc 抢租约  
-2. post-auth **ifdown** → 链路抖 → 会话掉 → 进程退  
-3. 看门狗每 2 分钟 **reauth** → 反复 stop/start  
-4. procd `reload_trigger network` → 每次 WAN renew 重启服务  
-
-稳定默认已规避 1–4。若仍退出：
-
-```bash
-ps | grep minieap
-tail -30 /var/log/minieap.log
-grep RUIJIE_DHCP /etc/ruijie/env   # 应为 0
-```
-
-## 命令对照
-
-| 命令 | 做什么 |
-|------|--------|
-| `post-auth` | 只软 WAN DHCP 续租 |
-| `restart` | 重启 minieap 服务（温和） |
-| `reauth` | stop → 认证 → 软续租 → 检测（少用） |
-
-```bash
-ip -4 addr show wan
-# 172.23.x → 隔离，跑 post-auth
-# 172.20.x → 正式段；仍不通查 DNS/路由
 ```
 
 ## 认证成功后 IP 变了
@@ -114,9 +78,10 @@ tail -80 /overlay/ruijie-net.log
 2. 手动一次：
 
 ```bash
-ruijie-reauth
-# 或
 ruijie-net-watchdog.sh once
+# 或
+/etc/init.d/ruijie-minieap restart
+/usr/bin/ruijie-post-auth.sh
 ```
 
 3. 仍失败再抓 snapshot：

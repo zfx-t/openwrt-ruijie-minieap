@@ -1,17 +1,12 @@
 #!/bin/sh
-# Ruijie drop detection + soft recover (no full reauth thrash).
+# Ruijie drop detection + recover (minieap + post-auth DHCP)
+# Persist forensics to overlay so reboot does not wipe evidence.
 #
 # Usage:
-#   ruijie-net-watchdog.sh once      # cron: check + soft recover if offline
-#   ruijie-net-watchdog.sh loop
-#   ruijie-net-watchdog.sh snapshot
-#   ruijie-net-watchdog.sh harvest
-#
-# Recover policy (stable):
-#   1) if minieap dead -> service start only
-#   2) soft post-auth (ubus renew, never ifdown)
-#   3) at most one service restart + soft post-auth
-#   Never call ruijie-reauth in a 2-minute loop (that caused exit storms).
+#   ruijie-net-watchdog.sh once      # cron: check + recover if offline
+#   ruijie-net-watchdog.sh loop      # foreground loop
+#   ruijie-net-watchdog.sh snapshot  # dump status into log
+#   ruijie-net-watchdog.sh harvest   # append logread excerpts to log
 
 LOG_FILE="${RUIJIE_NET_LOG:-/overlay/ruijie-net.log}"
 STATE_DIR="/tmp/ruijie-watch"
@@ -29,6 +24,7 @@ log() {
 }
 
 trim_log() {
+  # keep ~200KB
   [ -f "$LOG_FILE" ] || return 0
   sz=$(wc -c < "$LOG_FILE" 2>/dev/null || echo 0)
   if [ "$sz" -gt 200000 ] 2>/dev/null; then
@@ -36,39 +32,13 @@ trim_log() {
   fi
 }
 
-wan_ip() {
-  ip -4 -o addr show wan 2>/dev/null | awk '{print $4}' | head -1
-}
-
 is_online() {
   if command -v curl >/dev/null 2>&1; then
-    code=$(curl -4 -sS -m 5 -o /dev/null -w '%{http_code}' \
+    code=$(curl -sS -m 5 -o /dev/null -w '%{http_code}' \
       "http://connect.rom.miui.com/generate_204" 2>/dev/null || echo 000)
-    [ "$code" = "204" ] || [ "$code" = "200" ] || return 1
-    ip route | grep -q '^default ' || return 1
-    return 0
+    [ "$code" = "204" ] || [ "$code" = "200" ] && return 0
   fi
   ping -c 1 -W 3 "$PING_HOST" >/dev/null 2>&1
-}
-
-minieap_running() {
-  pidof minieap >/dev/null 2>&1
-}
-
-soft_post_auth() {
-  [ -x /usr/bin/ruijie-post-auth.sh ] && /usr/bin/ruijie-post-auth.sh 2>/dev/null || true
-}
-
-ensure_minieap() {
-  if minieap_running; then
-    return 0
-  fi
-  log "minieap not running -> start service only"
-  if [ -x /etc/init.d/ruijie-minieap ]; then
-    /etc/init.d/ruijie-minieap start 2>/dev/null || true
-  fi
-  sleep 8
-  soft_post_auth
 }
 
 snapshot() {
@@ -94,30 +64,34 @@ snapshot() {
 }
 
 recover() {
-  log "offline -> soft recover (no reauth thrash) wan=$(wan_ip)"
+  log "offline -> recover: snapshot + restart minieap + post-auth"
   snapshot
-  ensure_minieap
-  sleep 4
-  soft_post_auth
-  sleep 5
-  if is_online; then
-    log "recover success soft"
-    echo "online $(date)" > "$STATE_FILE"
-    return 0
-  fi
-  log "still offline -> one service restart + soft post-auth"
   if [ -x /etc/init.d/ruijie-minieap ]; then
     /etc/init.d/ruijie-minieap restart 2>/dev/null || true
+  else
+    killall minieap 2>/dev/null || true
   fi
-  sleep 12
-  soft_post_auth
+  sleep 8
+  if [ -x /usr/bin/ruijie-post-auth.sh ]; then
+    /usr/bin/ruijie-post-auth.sh 2>/dev/null || true
+  fi
   sleep 5
   if is_online; then
-    log "recover success after restart"
+    log "recover success"
     echo "online $(date)" > "$STATE_FILE"
     return 0
   fi
-  log "recover failed wan=$(wan_ip)"
+  log "recover still offline -> second post-auth"
+  if [ -x /usr/bin/ruijie-post-auth.sh ]; then
+    /usr/bin/ruijie-post-auth.sh 2>/dev/null || true
+  fi
+  sleep 5
+  if is_online; then
+    log "recover success (2nd post-auth)"
+    echo "online $(date)" > "$STATE_FILE"
+    return 0
+  fi
+  log "recover failed"
   snapshot
   echo "offline $(date)" > "$STATE_FILE"
   return 1
@@ -125,19 +99,17 @@ recover() {
 
 once() {
   trim_log
-  wan=$(wan_ip)
   if is_online; then
     prev=$(cat "$STATE_FILE" 2>/dev/null || echo "")
     case "$prev" in
       online*) ;;
-      *) log "ok online wan=$wan" ;;
+      *) log "ok online"; echo "online $(date)" > "$STATE_FILE" ;;
     esac
-    echo "online $(date)" > "$STATE_FILE"
-    # process died but net still ok -> restart keepalive only
-    minieap_running || ensure_minieap
+    wan=$(ip -4 -o addr show wan 2>/dev/null | awk '{print $4}' | head -1)
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] ok online wan=$wan" >> "$LOG_FILE" 2>/dev/null || true
     return 0
   fi
-  log "detected offline wan=$wan"
+  log "detected offline"
   recover
 }
 
@@ -154,7 +126,7 @@ case "${1:-once}" in
   loop)
     while true; do
       once || true
-      sleep "${RUIJIE_PING_INTERVAL:-120}"
+      sleep "${RUIJIE_PING_INTERVAL:-60}"
     done
     ;;
   snapshot) snapshot ;;
