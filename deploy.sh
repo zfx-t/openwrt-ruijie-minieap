@@ -92,6 +92,7 @@ tar cf - \
   files/usr/bin/ruijie-minieap-ctl \
   files/usr/bin/ruijie-post-auth.sh \
   files/usr/bin/ruijie-net-watchdog.sh \
+  files/usr/bin/ruijie-reauth \
   files/etc/init.d/ruijie-minieap \
   files/etc/ruijie/env.example \
   | ssh_cmd "tar xf - -C /tmp/ruijie-minieap-src"
