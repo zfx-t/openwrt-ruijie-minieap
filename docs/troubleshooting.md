@@ -97,3 +97,18 @@ ip route
 ## 与网页 Portal 的关系
 
 部分环境会同时劫持 HTTP 到 ePortal。本仓库走 **802.1x**。若纯 Portal 学校且无 802.1x，需另写网页脚本，本服务不适用。
+
+## 重启后卡在 172.23 / 认证成功却无外网（根因与最小修复）
+
+**现象：** 日志有「认证成功」，但 WAN 一直是隔离地址（如 `172.23.x`），或外网不通；`post-auth` 后链路 Down。
+
+**根因：** 旧版 `ruijie-post-auth.sh` 在 `renew` 之后还会 `ifup wan` / 失败时 `ifdown`。  
+`ifup` 会拆掉协议栈 → udhcpc **RELEASE** 租约 → 链路闪断 → 又回到隔离 DHCP，正式地址（如 `172.20.x`）拿不到。
+
+**最小修复（已合入）：**
+
+1. `post-auth` **只做** `ubus renew` + udhcpc `USR1`，**禁止 ifdown/ifup**
+2. init.d **去掉** `procd_add_reload_trigger "network"`（避免续租触发 802.1x 重启）
+3. 开机：等 WAN 就绪 → 启动 minieap → 延迟两次软 post-auth
+
+重启后应自动：认证 → 软续租 → `172.20.x` 上网。

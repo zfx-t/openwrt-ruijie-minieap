@@ -1,23 +1,13 @@
 #!/bin/sh
-# Called by minieap after auth (dhcp-script). Refreshes OpenWrt WAN DHCP lease.
-# Pre-auth IP is often an isolated subnet; without renew, traffic stays offline.
-
-logger -t ruijie-minieap "post-auth: renew WAN DHCP"
-
-# Prefer netifd renew; fall back to ifup
+# Minimal post-auth: SOFT DHCP renew only.
+# NEVER ifdown/ifup — that RELEASEs the lease and drops the WAN link
+# (reboot failure: stuck on 172.23 isolation after auth success).
+logger -t ruijie-minieap "post-auth: soft renew"
 if command -v ubus >/dev/null 2>&1; then
-  ubus call network.interface.wan renew 2>/dev/null \
-    || ubus call network.interface.wan down 2>/dev/null
-  sleep 1
-  ubus call network.interface.wan up 2>/dev/null || true
+  ubus call network.interface.wan renew 2>/dev/null || true
 fi
-
-ifup wan 2>/dev/null || true
-
-# Best-effort: signal udhcpc if present
 for p in $(pidof udhcpc 2>/dev/null); do
   kill -USR1 "$p" 2>/dev/null || true
 done
-
 logger -t ruijie-minieap "post-auth: done"
 exit 0
